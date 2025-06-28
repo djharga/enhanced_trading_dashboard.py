@@ -1,6 +1,6 @@
 numpy
 pandas
-talib==0.4.24 # يمكنك تجربة إزالة رقم الإصدار (talib) إذا كنت تواجه مشكلات في التثبيت، لكن تحديد إصدار معين غالبًا ما يكون أفضل
+pandas-ta # تم التعديل: استبدال talib بـ pandas-ta
 yfinance
 scikit-learn
 lightgbm
