@@ -1,1 +1,1 @@
-ta-lib
+pandas-ta
