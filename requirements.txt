@@ -1,0 +1,10 @@
+numpy
+pandas
+talib==0.4.24 # يمكنك تجربة إزالة رقم الإصدار (talib) إذا كنت تواجه مشكلات في التثبيت، لكن تحديد إصدار معين غالبًا ما يكون أفضل
+yfinance
+scikit-learn
+lightgbm
+streamlit
+matplotlib
+joblib
+plotly
