@@ -1,6 +1,6 @@
 numpy
 pandas
-pandas-ta # تم التعديل: استبدال talib بـ pandas-ta
+pandas-ta
 yfinance
 scikit-learn
 lightgbm
