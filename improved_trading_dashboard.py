@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import talib as ta
+import pandas_ta as ta  # تم التعديل: استخدام pandas_ta بدلاً من talib
 import yfinance as yf
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.preprocessing import RobustScaler
@@ -44,8 +44,8 @@ class ConfigManager:
                 "enabled": False,
                 "smtp_server": "smtp.gmail.com",
                 "smtp_port": 587,
-                "email": "",
-                "password": ""
+                "email": "your_email@gmail.com", # استبدل ببريدك الإلكتروني
+                "password": "your_app_password" # استبدل بكلمة مرور التطبيق الخاصة بك
             },
             "trading_pairs": [
                 "BTC-USD", "ETH-USD", "AAPL", "TSLA", "EURUSD=X"
@@ -184,23 +184,44 @@ class EnhancedIndicators:
                 method = getattr(self, f"calculate_{name.lower()}", None)
                 if method:
                     return name, method(data, settings.get('period', 14))
-            return None
+            return None, None
         except Exception as e:
             logger.error(f"خطأ في حساب المؤشر {name}: {str(e)}")
-            return None
+            return None, None
             
     def _calculate_classic_indicator(self, name: str, data: pd.DataFrame, settings: dict) -> Tuple[str, pd.Series]:
-        """حساب المؤشرات الكلاسيكية"""
+        """حساب المؤشرات الكلاسيكية باستخدام pandas_ta"""
         if name == 'RSI':
-            return name, ta.RSI(data['Close'], timeperiod=settings.get('period', 14))
+            # pandas_ta يضيف المؤشر كعمود جديد مباشرة
+            rsi_series = data.ta.rsi(length=settings.get('period', 14))
+            return name, rsi_series
         elif name == 'MACD':
-            macd, signal, _ = ta.MACD(data['Close'])
-            return name, macd - signal
+            # pandas_ta يعيد DataFrame بأعمدة MACD, Histogram, Signal
+            macd_df = data.ta.macd(append=False) # append=False لتجنب الإضافة المباشرة للـ DataFrame
+            # نستخدم الفرق بين MACD و Signal Line كقيمة واحدة للمؤشر
+            # تأكد من أسماء الأعمدة التي ينتجها pandas_ta, عادة ما تكون مثل 'MACD_12_26_9', 'MACDs_12_26_9'
+            # سنقوم بحساب الفرق هنا ونستخدم آخر قيمتين فقط لإظهار الفروقات.
+            if macd_df is not None and not macd_df.empty:
+                # أسماء الأعمدة الافتراضية لـ pandas_ta MACD
+                macd_col = f"MACD_12_26_9"
+                signal_col = f"MACDs_12_26_9"
+                if macd_col in macd_df.columns and signal_col in macd_df.columns:
+                    return name, macd_df[macd_col] - macd_df[signal_col]
+            return name, pd.Series(np.nan, index=data.index)
         elif name == 'BB':
-            upper, middle, lower = ta.BBANDS(data['Close'], timeperiod=settings.get('period', 20))
-            return name, (data['Close'] - middle) / (upper - lower)
-            
-    # تحديث المؤشرات الموجودة مع إضافة المزيد من التحسينات والتوثيق
+            # pandas_ta يعيد DataFrame بـ Lower, Middle, Upper Band وأعمدة أخرى
+            bbands_df = data.ta.bbands(length=settings.get('period', 20), append=False)
+            # نحسب الانحراف المعياري للسعر نسبة إلى النطاق أو نستخدم نسبة%B
+            # نسبة %B هي مؤشر جيد لموضع السعر داخل نطاقات بولينجر
+            if bbands_df is not None and not bbands_df.empty:
+                # أسماء الأعمدة الافتراضية لـ pandas_ta BBANDS
+                percent_b_col = f"BBP_{settings.get('period', 20)}_2.0" # نسبة %B
+                if percent_b_col in bbands_df.columns:
+                    return name, bbands_df[percent_b_col]
+            return name, pd.Series(np.nan, index=data.index)
+        return name, pd.Series(np.nan, index=data.index) # في حالة عدم تطابق الاسم أو فشل الحساب
+
+    # مؤشراتك المخصصة - تأكد من وجود تعريف لكل منها
     def calculate_cti(self, data: pd.DataFrame, period: int = 14) -> pd.Series:
         """مؤشر التراكمي الذكي المحسن للتحركات الصغيرة"""
         direction = np.where(data['Close'].diff() > 0, 1, -1)
@@ -208,8 +229,57 @@ class EnhancedIndicators:
         volatility_adj = data['Close'].pct_change().rolling(period).std()
         cti = (direction * magnitude * (1 + volatility_adj)).ewm(span=period).mean()
         return cti * 100
+        
+    def calculate_vpin(self, data: pd.DataFrame, period: int = 20) -> pd.Series:
+        """مؤشر VPIN المتطور مع تصحيح الانحراف"""
+        buy_vol = np.where(data['Close'] > data['Open'], data['Volume'], 0)
+        sell_vol = np.where(data['Close'] < data['Open'], data['Volume'], 0)
+        vol_diff = pd.Series(sell_vol).rolling(period).sum() - pd.Series(buy_vol).rolling(period).sum()
+        total_vol = data['Volume'].rolling(period).sum().replace(0, 1) # تجنب القسمة على صفر
+        vpin = vol_diff / total_vol
+        return vpin * 100
 
-    # ... (إضافة باقي المؤشرات المحسنة)
+    def calculate_amv(self, data: pd.DataFrame, period: int = 14) -> pd.Series:
+        """مؤشر الدوامة الذكية التكيفية"""
+        hl_range = data['High'] - data['Low']
+        # استخدام ATR من pandas_ta بدلاً من TRANGE
+        tr = data.ta.atr(length=1, append=False) # ATR مع فترة 1 هو نفسه TRANGE تقريباً
+        amv = hl_range.rolling(period).std() / (tr.rolling(period).mean() + 1e-10) # إضافة ثابت صغير لتجنب القسمة على صفر
+        return amv * 100
+
+    def calculate_tsd(self, data: pd.DataFrame, period: int = 10) -> pd.Series:
+        """التباعد الطيفي الذكي ثلاثي الأبعاد"""
+        ma1 = data['Close'].ewm(span=period).mean()
+        ma2 = data['Close'].ewm(span=period*2).mean()
+        ma3 = data['Close'].ewm(span=period*4).mean()
+        tsd = (ma1 - ma2).abs() + (ma2 - ma3).abs() + (ma1 - ma3).abs()
+        return tsd / data['Close'] * 100
+
+    def calculate_qms(self, data: pd.DataFrame, period: int = 5) -> pd.Series:
+        """مؤشر الزخم الكمي متعدد الأبعاد"""
+        log_ret = np.log(data['Close']/data['Close'].shift(1))
+        # Ensure 'apply' is used correctly with lambda for rolling window
+        qms = log_ret.rolling(period).apply(lambda x: np.sqrt(np.sum(x**2)), raw=False)
+        return qms * 100
+
+    def calculate_nvi(self, data: pd.DataFrame, period: int = 255) -> pd.Series:
+        """مؤشر الحجم السلبي الذكي"""
+        price_change = data['Close'].pct_change()
+        nvi = pd.Series(1, index=data.index)
+        for i in range(1, len(data)):
+            if data['Volume'].iloc[i] < data['Volume'].iloc[i-1]:
+                nvi.iloc[i] = nvi.iloc[i-1] * (1 + price_change.iloc[i])
+            else:
+                nvi.iloc[i] = nvi.iloc[i-1]
+        return nvi.rolling(period).mean()
+
+    def calculate_pfe(self, data: pd.DataFrame, period: int = 14) -> pd.Series:
+        """كفاءة الفركتال القطبية"""
+        # إضافة 1e-10 لتجنب القسمة على صفر في المقام
+        pfe = (data['Close'] - data['Close'].shift(period)) / \
+              (np.sqrt((data['Close'].diff()**2 + 1e-10).rolling(period).sum()))
+        return pfe * 100
+
 
 class EnhancedAIModel:
     """نموذج الذكاء الاصطناعي المحسن"""
@@ -279,16 +349,33 @@ class EnhancedAIModel:
         """توليد إشارة تداول مع درجة الثقة"""
         if self.model is None:
             self._load_model()
-            
+            # إذا لم يتم تحميل النموذج بعد المحاولة، فهذا يعني أنه غير موجود، لا يمكن التنبؤ
+            if self.model is None:
+                logger.error("النموذج غير موجود. لا يمكن توليد إشارة.")
+                return 0, 0.0
+
         try:
-            proba = self.model.predict_proba(X)[:, 1]
-            confidence = abs(proba[-1] - 0.5) * 2  # تحويل الاحتمالية إلى درجة ثقة
-            
-            if proba[-1] > self.config['threshold']:
-                return 1, confidence  # إشارة شراء
-            elif proba[-1] < (1 - self.config['threshold']):
-                return -1, confidence  # إشارة بيع
-            return 0, confidence  # حياد
+            # التأكد أن X تحتوي على نفس الأعمدة المستخدمة في التدريب
+            # وإلا سيحدث خطأ عند التحجيم أو التنبؤ
+            if self.model is not None and isinstance(self.model, make_pipeline):
+                # إذا كان النموذج مدرباً، استخدم الأعمدة التي تدرب عليها
+                # وإلا، فافترض أن X جاهزة للتنبؤ
+                
+                # إذا كان scaler موجوداً في الـ pipeline، يجب أن يتعامل مع الأعمدة بشكل صحيح
+                # أو يجب التأكد من تطابق الأعمدة بين X الحالية و X التي تدرب عليها النموذج
+                
+                # هنا نفترض أن X (current_features) تحتوي على الأعمدة الصحيحة
+                proba = self.model.predict_proba(X)[:, 1]
+                confidence = abs(proba[-1] - 0.5) * 2  # تحويل الاحتمالية إلى درجة ثقة
+                
+                if proba[-1] > self.config['threshold']:
+                    return 1, confidence  # إشارة شراء
+                elif proba[-1] < (1 - self.config['threshold']):
+                    return -1, confidence  # إشارة بيع
+                return 0, confidence  # حياد
+            else:
+                logger.warning("النموذج غير مدرب أو غير صحيح. لا يمكن توليد إشارة.")
+                return 0, 0.0
             
         except Exception as e:
             logger.error(f"خطأ في توليد الإشارة: {str(e)}")
@@ -307,14 +394,20 @@ class EnhancedAIModel:
         
     def _save_model(self) -> None:
         """حفظ النموذج المدرب"""
-        joblib.dump(self.model, self.model_path)
+        try:
+            joblib.dump(self.model, self.model_path)
+        except Exception as e:
+            logger.error(f"خطأ في حفظ النموذج: {str(e)}")
         
     def _load_model(self) -> None:
         """تحميل النموذج المحفوظ"""
         try:
             self.model = joblib.load(self.model_path)
-        except:
-            logger.warning("لم يتم العثور على نموذج محفوظ")
+            logger.info("تم تحميل النموذج المحفوظ بنجاح.")
+        except FileNotFoundError:
+            logger.warning("لم يتم العثور على نموذج محفوظ في المسار: %s", self.model_path)
+        except Exception as e:
+            logger.error(f"خطأ في تحميل النموذج: {str(e)}")
             
     # Helper methods for feature engineering
     def _calculate_price_momentum(self, data: pd.DataFrame) -> pd.Series:
@@ -323,13 +416,21 @@ class EnhancedAIModel:
         
     def _calculate_volume_force(self, data: pd.DataFrame) -> pd.Series:
         """حساب قوة الحجم"""
-        return (data['Volume'] * data['Close'].pct_change()).rolling(5).sum()
+        # تأكد من أن data['Close'].pct_change() لا تحتوي على NaN في البداية لعملية الضرب
+        # يمكن ملء NaN بـ 0 أو ffill
+        pct_change = data['Close'].pct_change().fillna(0) 
+        return (data['Volume'] * pct_change).rolling(5).sum()
         
     def _detect_market_regime(self, data: pd.DataFrame) -> pd.Series:
         """تحديد نظام السوق"""
         volatility = data['Close'].pct_change().rolling(20).std()
         trend = data['Close'].pct_change(20)
-        return pd.qcut(volatility * abs(trend), q=3, labels=[-1, 0, 1], duplicates='drop')
+        #fillna(0) لتجنب NaN قبل qcut
+        product = (volatility * abs(trend)).fillna(0) 
+        # تأكد أن هناك تنوع كافي في القيم لإنشاء 3 quantiles
+        if len(product.unique()) < 3: # إذا كانت القيم كلها متطابقة تقريباً
+            return pd.Series(0, index=data.index) # إرجاع قيمة افتراضية
+        return pd.qcut(product, q=3, labels=[-1, 0, 1], duplicates='drop')
         
     def _prepare_target(self, data: pd.DataFrame) -> pd.Series:
         """تحضير المتغير التابع"""
@@ -338,8 +439,11 @@ class EnhancedAIModel:
         
     def _clean_data(self, X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
         """تنظيف البيانات"""
-        valid_idx = ~X.isna().any(axis=1) & ~y.isna()
-        return X[valid_idx], y[valid_idx]
+        # تنظيف X و y بشكل متزامن
+        combined = pd.concat([X, y.rename('target')], axis=1).dropna()
+        X_cleaned = combined.drop('target', axis=1)
+        y_cleaned = combined['target']
+        return X_cleaned, y_cleaned
 
 class NotificationManager:
     """إدارة الإشعارات والتنبيهات"""
@@ -350,6 +454,7 @@ class NotificationManager:
     def send_alert(self, symbol: str, signal: int, confidence: float) -> bool:
         """إرسال تنبيه عبر البريد الإلكتروني"""
         if not self.config['enabled']:
+            logger.info("إشعارات البريد الإلكتروني غير مفعلة.")
             return False
             
         signal_map = {1: "شراء", -1: "بيع", 0: "حياد"}
@@ -366,332 +471,4 @@ class NotificationManager:
             msg['From'] = self.config['email']
             msg['To'] = self.config['email']
             
-            with smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port']) as server:
-                server.starttls()
-                server.login(self.config['email'], self.config['password'])
-                server.send_message(msg)
-                
-            return True
-            
-        except Exception as e:
-            logger.error(f"خطأ في إرسال التنبيه: {str(e)}")
-            return False
-
-class EnhancedDashboard:
-    """لوحة التحكم المحسنة"""
-    
-    def __init__(self):
-        self.config_manager = ConfigManager()
-        self.data_manager = DataManager()
-        self.indicators = EnhancedIndicators(self.config_manager.config)
-        self.ai_model = EnhancedAIModel(self.config_manager.config)
-        self.notification_manager = NotificationManager(self.config_manager.config)
-        
-    def show_dashboard(self):
-        """عرض لوحة التحكم المحسنة"""
-        st.set_page_config(
-            layout="wide",
-            page_title="نظام التداول الذكي المتقدم",
-            page_icon="📈"
-        )
-        
-        self._setup_styles()
-        self._show_header()
-        
-        # تقسيم الشاشة
-        col1, col2 = st.columns([1, 3])
-        
-        with col1:
-            self._show_sidebar_controls()
-            
-        with col2:
-            self._show_main_content()
-            
-    def _setup_styles(self):
-        """إعداد الأنماط"""
-        st.markdown("""
-        <style>
-        .stSlider > div { padding: 0 10px; }
-        .stTextInput > div > div > input { direction: ltr; text-align: right; }
-        .sidebar .sidebar-content { direction: rtl; }
-        .big-font { font-size: 24px !important; }
-        .highlight { background-color: #f0f2f6; padding: 10px; border-radius: 5px; }
-        </style>
-        """, unsafe_allow_html=True)
-        
-    def _show_header(self):
-        """عرض رأس الصفحة"""
-        st.title("📊 نظام التداول الذكي المتقدم")
-        st.markdown("---")
-        
-    def _show_sidebar_controls(self):
-        """عرض أدوات التحكم في الشريط الجانبي"""
-        st.sidebar.header("⚙️ إعدادات النظام")
-        
-        # اختيار الأداة المالية
-        symbol = st.sidebar.selectbox(
-            "اختر الأداة المالية",
-            self.config_manager.config['trading_pairs']
-        )
-        
-        # إضافة أداة مالية جديدة
-        new_symbol = st.sidebar.text_input("إضافة أداة مالية جديدة")
-        if new_symbol:
-            if new_symbol not in self.config_manager.config['trading_pairs']:
-                self.config_manager.config['trading_pairs'].append(new_symbol)
-                self.config_manager.save_config(self.config_manager.config)
-                st.sidebar.success("تمت إضافة الأداة المالية بنجاح")
-                
-        # اختيار الفترة الزمنية
-        period = st.sidebar.radio(
-            "الفترة الزمنية",
-            ['1w', '1m', '3m', '6m', '1y', '2y'],
-            index=2
-        )
-        
-        # إعدادات المؤشرات
-        st.sidebar.subheader("ضبط المؤشرات الفنية")
-        for name, config in self.config_manager.config['indicators'].items():
-            col1, col2, col3 = st.sidebar.columns([1, 2, 1])
-            with col1:
-                config['active'] = st.checkbox(
-                    f"{name}",
-                    value=config['active'],
-                    key=f"{name}_active"
-                )
-            with col2:
-                if 'period' in config:
-                    config['period'] = st.slider(
-                        "الفترة",
-                        5, 100, config['period'],
-                        key=f"{name}_period"
-                    )
-            with col3:
-                config['weight'] = st.slider(
-                    "الوزن",
-                    0.0, 1.0, config['weight'],
-                    key=f"{name}_weight"
-                )
-                
-        # حفظ التغييرات
-        if st.sidebar.button("💾 حفظ الإعدادات"):
-            self.config_manager.save_config(self.config_manager.config)
-            st.sidebar.success("تم حفظ الإعدادات بنجاح")
-            
-        return symbol, period
-        
-    def _show_main_content(self):
-        """عرض المحتوى الرئيسي"""
-        symbol, period = self._show_sidebar_controls()
-        
-        if st.button("🔄 تحديث التحليل"):
-            self._run_analysis(symbol, period)
-            
-    def _run_analysis(self, symbol: str, period: str):
-        """تشغيل التحليل"""
-        with st.spinner("جاري تحليل السوق وتوليد الإشارات..."):
-            try:
-                # تحميل البيانات
-                data = self.data_manager.get_data(symbol, period)
-                
-                # حساب المؤشرات
-                indicators_data = self.indicators.calculate_all_indicators(data)
-                
-                # تدريب النموذج
-                X, y = self.ai_model.prepare_data(data, indicators_data)
-                metrics = self.ai_model.train_model(X, y)
-                
-                # توليد الإشارة
-                signal, confidence = self.ai_model.predict_signal(X.iloc[-1:])
-                
-                # عرض النتائج
-                self._show_results(data, indicators_data, metrics, signal, confidence)
-                
-                # إرسال تنبيه
-                if abs(signal) == 1 and confidence > 0.8:
-                    self.notification_manager.send_alert(symbol, signal, confidence)
-                    
-            except Exception as e:
-                st.error(f"حدث خطأ أثناء التحليل: {str(e)}")
-                logger.error(f"خطأ في التحليل: {str(e)}")
-                
-    def _show_results(self, data: pd.DataFrame, indicators: pd.DataFrame,
-                     metrics: dict, signal: int, confidence: float):
-        """عرض نتائج التحليل"""
-        # عرض المقاييس الرئيسية
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            self._metric_card("دقة النموذج", f"{metrics['accuracy']:.2%}")
-        with col2:
-            self._metric_card("F1 Score", f"{metrics['f1']:.2%}")
-        with col3:
-            signal_text = "شراء 🟢" if signal == 1 else "بيع 🔴" if signal == -1 else "حياد ⚪"
-            self._metric_card("الإشارة", signal_text)
-        with col4:
-            self._metric_card("درجة الثقة", f"{confidence:.2%}")
-            
-        # عرض التحليل البياني
-        tab1, tab2, tab3 = st.tabs(["الرسم البياني", "المؤشرات الفنية", "تحليل النموذج"])
-        
-        with tab1:
-            self._plot_price_chart(data, signal)
-            
-        with tab2:
-            self._plot_indicators(data, indicators)
-            
-        with tab3:
-            self._show_model_analysis()
-            
-    def _metric_card(self, title: str, value: str):
-        """عرض بطاقة مقياس"""
-        st.markdown(f"""
-        <div class="highlight">
-            <p style="font-size: 14px; color: gray;">{title}</p>
-            <p class="big-font">{value}</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-    def _plot_price_chart(self, data: pd.DataFrame, signal: int):
-        """رسم المخطط السعري"""
-        fig = make_subplots(rows=2, cols=1, shared_xaxis=True,
-                          vertical_spacing=0.03,
-                          row_heights=[0.7, 0.3])
-                          
-        # إضافة شمعة الأسعار
-        fig.add_trace(
-            go.Candlestick(
-                x=data.index,
-                open=data['Open'],
-                high=data['High'],
-                low=data['Low'],
-                close=data['Close'],
-                name="الأسعار"
-            ),
-            row=1, col=1
-        )
-        
-        # إضافة حجم التداول
-        fig.add_trace(
-            go.Bar(
-                x=data.index,
-                y=data['Volume'],
-                name="الحجم",
-                marker_color='rgb(158,202,225)'
-            ),
-            row=2, col=1
-        )
-        
-        # إضافة إشارة التداول
-        if abs(signal) == 1:
-            last_price = data['Close'].iloc[-1]
-            fig.add_trace(
-                go.Scatter(
-                    x=[data.index[-1]],
-                    y=[last_price],
-                    mode='markers',
-                    marker=dict(
-                        symbol='triangle-up' if signal == 1 else 'triangle-down',
-                        size=15,
-                        color='green' if signal == 1 else 'red'
-                    ),
-                    name="إشارة التداول"
-                ),
-                row=1, col=1
-            )
-            
-        # تخصيص المخطط
-        fig.update_layout(
-            title="تحليل السعر والحجم",
-            xaxis_title="التاريخ",
-            yaxis_title="السعر",
-            height=600,
-            showlegend=True
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-    def _plot_indicators(self, data: pd.DataFrame, indicators: pd.DataFrame):
-        """رسم المؤشرات الفنية"""
-        active_indicators = [name for name, config in 
-                           self.config_manager.config['indicators'].items()
-                           if config['active']]
-                           
-        n_indicators = len(active_indicators)
-        if n_indicators == 0:
-            st.warning("لا توجد مؤشرات نشطة للعرض")
-            return
-            
-        # إنشاء مخطط لكل مؤشر
-        fig = make_subplots(
-            rows=n_indicators,
-            cols=1,
-            shared_xaxis=True,
-            vertical_spacing=0.03,
-            subplot_titles=active_indicators
-        )
-        
-        for i, indicator_name in enumerate(active_indicators, 1):
-            fig.add_trace(
-                go.Scatter(
-                    x=data.index,
-                    y=indicators[indicator_name],
-                    name=indicator_name,
-                    line=dict(width=1)
-                ),
-                row=i, col=1
-            )
-            
-        fig.update_layout(
-            height=200 * n_indicators,
-            showlegend=True,
-            title_text="المؤشرات الفنية"
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-    def _show_model_analysis(self):
-        """عرض تحليل النموذج"""
-        if self.ai_model.feature_importances:
-            st.subheader("أهمية المؤشرات في النموذج")
-            
-            # تحويل أهمية المؤشرات إلى DataFrame
-            fi_df = pd.DataFrame.from_dict(
-                self.ai_model.feature_importances,
-                orient='index',
-                columns=['الأهمية']
-            ).sort_values('الأهمية', ascending=True)
-            
-            # رسم مخطط شريطي أفقي
-            fig = go.Figure(
-                go.Bar(
-                    y=fi_df.index,
-                    x=fi_df['الأهمية'],
-                    orientation='h'
-                )
-            )
-            
-            fig.update_layout(
-                title="أهمية المؤشرات",
-                xaxis_title="الأهمية النسبية",
-                height=400
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-        # عرض مقاييس الأداء
-        st.subheader("مقاييس أداء النموذج")
-        metrics_df = pd.DataFrame({
-            'المقياس': ['الدقة', 'F1 Score', 'ROC AUC'],
-            'القيمة': [
-                f"{self.ai_model.metrics['accuracy']:.2%}",
-                f"{self.ai_model.metrics['f1']:.2%}",
-                f"{self.ai_model.metrics['roc_auc']:.2%}"
-            ]
-        })
-        
-        st.table(metrics_df)
-
-if __name__ == "__main__":
-    dashboard = EnhancedDashboard()
-    dashboard.show_dashboard()
+            with smtplib.SMTP(self.config['smtp_server'],
