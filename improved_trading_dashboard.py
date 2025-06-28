@@ -471,4 +471,4 @@ class NotificationManager:
             msg['From'] = self.config['email']
             msg['To'] = self.config['email']
             
-            with smtplib.SMTP(self.config['smtp_server'],
+            with smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port']) as server:
